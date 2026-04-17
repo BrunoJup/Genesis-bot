@@ -1,24 +1,21 @@
 import os
 import telebot
-import google.generativeai as genai
+import base64
 from flask import Flask
 from threading import Thread
-from PIL import Image
-import io
+from openai import OpenAI
 
 # --- CONFIGURATION ---
-# Set these in Render.com Dashboard -> Environment Variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
 
-# Initialize Telegram Bot
+# Initialize clients
 bot = telebot.TeleBot(BOT_TOKEN)
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
-# Initialize Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')
-
-# Initialize Flask (Required for Render to stay alive)
 app = Flask('')
 
 ULTRA_PRO_PROMPT = """
@@ -60,43 +57,61 @@ OR
 """
 
 @bot.message_handler(content_types=['photo'])
-def handle_photo(message):
+def handle_stats_screenshot(message):
     try:
-        bot.reply_to(message, "🧠 Elite Blackbox is scanning the field...")
+        bot.reply_to(message, "🔍 Scanning fixtures via OpenRouter...")
 
-        # 1. Download photo from Telegram
+        # 1. Download image from Telegram
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
-        # 2. Convert to PIL Image for Gemini
-        img = Image.open(io.BytesIO(downloaded_file))
+        # 2. Encode to Base64
+        base64_image = base64.b64encode(downloaded_file).decode('utf-8')
 
-        # 3. Call Gemini API
-        response = model.generate_content([ULTRA_PRO_PROMPT, img])
-        
-        # 4. Reply with analysis
-        bot.reply_to(message, response.text)
+        # 3. Request analysis from OpenRouter
+        # Using gemini-2.0-flash-001 for high speed and great OCR
+        response = client.chat.completions.create(
+            extra_headers={
+                "HTTP-Referer": "https://render.com", # Required by OpenRouter
+                "X-Title": "Football Analyst Bot",
+            },
+            model="google/gemini-2.0-flash-001",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": ULTRA_PRO_PROMPT},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+
+        result = response.choices[0].message.content
+        bot.reply_to(message, result)
 
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Error: {str(e)}")
+        bot.reply_to(message, f"❌ Error: {str(e)}")
 
 @bot.message_handler(commands=['start'])
-def welcome(message):
-    bot.reply_to(message, "⚽ ULTRA PRO MAX LEGEND ANALYST ACTIVE.\nSend me a screenshot of the matches.")
+def start(message):
+    bot.reply_to(message, "⚽ ULTRA PRO MAX LEGEND ANALYST ACTIVE.\nSend a screenshot of the match statistics.")
 
-# --- RENDER DEPLOYMENT HELPERS ---
+# --- RENDER WEB SERVER ---
 @app.route('/')
-def health_check():
-    return "Bot is online!", 200
+def index():
+    return "Analyst Bot is Running"
 
-def run_flask():
-    # Render provides the PORT env var automatically
+def run_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 if __name__ == "__main__":
-    # Start the Flask web server in a background thread
-    Thread(target=run_flask).start()
-    # Start the Telegram Bot polling
-    print("Bot is polling...")
+    Thread(target=run_server).start()
+    print("Bot is live...")
     bot.infinity_polling()
