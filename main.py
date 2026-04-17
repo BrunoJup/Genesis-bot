@@ -17,26 +17,31 @@ client = OpenAI(
 
 app = Flask('')
 
-# --- STRIPPED DOWN PROMPT ---
-# This forces the AI to ignore logic explanations and only give the final pick.
+# --- THE ELITE BLACKBOX LOGIC (INTERNAL ONLY) ---
 ULTRA_PRO_PROMPT = """
-Analyze the football fixtures in this image.
-Apply Elite Filter: Table Diff ≤ 2, Top 12 Rank, High Scoring Form (>1.5 PPG).
+ROLE: Elite Virtual Football Blackbox.
+TASK: Extract the single highest-probability scoring match.
 
-STRICT OUTPUT RULE:
-- If a match qualifies, output ONLY the following 3 lines.
-- If no match qualifies, output: ❌ NO PICK
+INTERNAL FILTERS:
+1. Structural Balance: Table proximity ≤ 2, Points Gap ≤ 4, Both teams in Top 12.
+2. Legend Filter: Both teams GF > 1.5/match, GA > 1.2/match. Fail if failed to score in 2 of last 5.
+3. Volatility: Target High GF + High GA. Avoid strong defenses.
 
-FORMAT:
+STRICT OUTPUT INSTRUCTIONS:
+- If a match meets ALL criteria, output ONLY the Match, BTTS/Over 3.5, and Confidence.
+- DO NOT provide the statistical breakdown or reasoning.
+- If no match qualifies, output: ❌ NO PICK (Reason: [Short Reason])
+
+REQUIRED FORMAT:
 MATCH: [Team A vs Team B]
-MARKET: [BTTS: YES / OVER 3.5]
-CONFIDENCE: [🔥 HIGH / MEDIUM]
+MARKET: BTTS: YES | OVER 3.5: [YES/NO]
+CONFIDENCE: 🔥 HIGH (95%+)
 """
 
 @bot.message_handler(content_types=['photo'])
 def handle_vision_analysis(message):
     try:
-        bot.reply_to(message, "⏳ Analyzing...")
+        bot.reply_to(message, "⚡ Running Ultra Pro Max Legend Analysis...")
         
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
@@ -63,20 +68,20 @@ def handle_vision_analysis(message):
         )
 
         analysis_result = response.choices[0].message.content
-        # Final safety check to ensure it's not a wall of text
         bot.reply_to(message, analysis_result.strip())
 
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+        bot.reply_to(message, f"❌ System Error: {str(e)}")
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    bot.reply_to(message, "⚽ Analyst Ready. Send fixture screenshot.")
+    bot.reply_to(message, "⚽ **ULTRA PRO MAX LEGEND ANALYST**\nSystem Status: ⚡ ONLINE\nSend your fixture screenshot.")
 
-# --- MINIMAL FLASK FOR CRON-JOB.ORG ---
+# --- MINIMAL FLASK FOR CRON-JOB.ORG SUCCESS ---
 @app.route('/')
 def health_check():
-    return "OK", 200 # Minimal 2-byte response
+    # Returns only 2 bytes to prevent "Output Too Large" error
+    return "OK", 200
 
 def run_flask_server():
     port = int(os.environ.get("PORT", 8080))
@@ -87,5 +92,5 @@ if __name__ == "__main__":
     t.daemon = True
     t.start()
     
-    print("Bot is live...")
+    print("Bot starting...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
