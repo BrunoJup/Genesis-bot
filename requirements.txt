@@ -1,4 +1,5 @@
+
 pyTelegramBotApi
-google-generativeai
 flask
+openai
 Pillow
