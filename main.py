@@ -1,145 +1,207 @@
 import os
-import telebot
+import logging
 import base64
-from flask import Flask
-from threading import Thread
+from io import BytesIO
+
+import telebot
+from PIL import Image
 from openai import OpenAI
 
-# --- CONFIGURATION ---
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+# ENV VARIABLES
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# INIT BOT
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+logging.basicConfig(level=logging.INFO)
+
+# AI CLIENT (OpenRouter)
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    api_key=OPENROUTER_API_KEY
 )
 
-app = Flask('')
-
-# --- THE HARDENED SYSTEM PROMPT ---
+# ULTRA PROMPT
 SYSTEM_PROMPT = """
 You are an elite, expert-level high-precision football goals analysis engine.
-The user will upload a screenshot containing match statistics.
-Your job is to read the screenshot, extract numerical goal data, evaluate the highest-value over markets (Over 5.5, Over 6.5, Over 7.5), and apply an advanced scoring model to output an "Ultra Pro Max Legend Pick".
 
-STRICT RULES
+STRICT RULES:
 Work silently.
-Perform all calculations internally.
 No explanations.
-No reasoning text.
-No assumptions text.
-Only output the final structured result.
+No commentary.
+Only output final structured result.
 
-STEP 1 — DATA EXTRACTION
-From the screenshot extract:
-Team A last match goals scored → a_for
-Team A last match goals conceded → a_against
-Team B last match goals scored → b_for
-Team B last match goals conceded → b_against
-Convert them into numeric arrays.
+STEP 1 — Extract:
+a_for, a_against, b_for, b_against (arrays)
 
-STEP 2 — APPLY THE EXPERT MODEL EXACTLY
-Calculations:
-a_for_avg = sum(a_for) / len(a_for)
-a_against_avg = sum(a_against) / len(a_against)
-b_for_avg = sum(b_for) / len(b_for)
-b_against_avg = sum(b_against) / len(b_against)
-total_avg = a_for_avg + a_against_avg + b_for_avg + b_against_avg
+STEP 2 — Compute:
+a_for_avg
+a_against_avg
+b_for_avg
+b_against_avg
+total_avg = sum of all
 ht_avg = (a_for_avg + b_for_avg) / 2
 
-SCORING RULES (Base Score = 0)
-TOTAL GOALS METRIC
-total_avg ≥ 9.0 → +4
-total_avg ≥ 8.0 → +3
-total_avg ≥ 7.0 → +2
-total_avg ≥ 6.0 → +1
+STEP 3 — Score:
+TOTAL:
+≥9 → +4
+≥8 → +3
+≥7 → +2
+≥6 → +1
 
-HALF TIME METRIC
-ht_avg ≥ 4.0 → +3
-ht_avg ≥ 3.0 → +2
-ht_avg ≥ 2.5 → +1
+HT:
+≥4 → +3
+≥3 → +2
+≥2.5 → +1
 
-DEFENSIVE LEAK BONUS
-a_against_avg ≥ 3.0 AND b_against_avg ≥ 3.0 → +2
-a_against_avg ≥ 2.0 AND b_against_avg ≥ 2.0 → +1
+DEFENSE:
+both ≥3 → +2
+both ≥2 → +1
 
-MARKET SELECTION ALGORITHM
-Select the Best Market based on total_avg:
-total_avg ≥ 8.5 → OVER 7.5
-7.0 ≤ total_avg < 8.5 → OVER 6.5
-5.8 ≤ total_avg < 7.0 → OVER 5.5
-total_avg < 5.8 → NO BET
+STEP 4 — MARKET DECISION:
 
-CONFIDENCE MAPPING
-Score ≥ 9 → 99%
-Score = 8 → 94%
-Score = 7 → 88%
-Score = 6 → 82%
-Score = 5 → 76%
-Score = 4 → 68%
-Score < 4 → 45%
+If total_avg ≥ 8.5 AND score ≥ 8:
+→ OVER 7.5
 
-VERDICT RULES
-Score ≥ 8 → 👑 ULTRA PRO MAX LEGEND PICK
-Score ≥ 6 → 🔥 VERY STRONG
-Score ≥ 4 → ✅ STRONG
-Score < 4 → ❌ NO BET
+If 7.2 ≤ total_avg < 8.5 AND score ≥ 6:
+→ OVER 6.5
 
-FINAL OUTPUT FORMAT ONLY
+If 6.0 ≤ total_avg < 7.2 AND score ≥ 5:
+→ OVER 5.5
+
+Else:
+→ NO BET
+
+STEP 5 — CONFIDENCE:
+9+ → 99%
+8 → 94%
+7 → 88%
+6 → 82%
+5 → 76%
+4 → 68%
+<4 → 45%
+
+STEP 6 — VERDICT:
+≥8 → 👑 ULTRA PRO MAX LEGEND PICK
+≥6 → 🔥 VERY STRONG
+≥4 → ✅ STRONG
+<4 → ❌ NO BET
+
+FINAL OUTPUT ONLY:
+
 Match: TEAM A vs TEAM B
 Avg Total Goals: X.XX
 Avg HT Goals: X.XX
-Best Market: OVER X.5
+Best Market: OVER X.5 / NO BET
 Confidence: XX%
-Verdict: [Emoji] [Verdict Text]
+Verdict: [Emoji] [Text]
 """
 
-# --- ANALYSIS ENGINE ---
-def run_ai_analysis(base64_image, model_name):
-    """Executes AI logic with specific model and error handling."""
-    return client.chat.completions.create(
-        extra_headers={"HTTP-Referer": "https://render.com", "X-Title": "Football Analyst Bot"},
-        model=model_name,
-        max_tokens=800,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": [
-                {"type": "text", "text": "Analyze this screenshot:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-            ]}
-        ]
-    )
+MODELS = [
+    "openai/gpt-4o",
+    "google/gemini-2.0-pro-exp-02-05"
+]
 
-@bot.message_handler(content_types=['photo'])
-def handle_vision_analysis(message):
-    processing_msg = bot.reply_to(message, "⚡ Initializing Analysis (High Precision Mode)...")
-    try:
-        # Prepare Image
-        file_info = bot.get_file(message.photo[-1].file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        base64_image = base64.b64encode(downloaded_file).decode('utf-8')
-        
-        # Priority: GPT-4o
+
+def send_to_ai(image_base64):
+    for model in MODELS:
         try:
-            response = run_ai_analysis(base64_image, "openai/gpt-4o")
-        except Exception as e:
-            # Fallback: Gemini 2.0
-            bot.edit_message_text("⚠️ Precision Model busy/limited. Switching to Secondary Engine...", message.chat.id, processing_msg.message_id)
-            response = run_ai_analysis(base64_image, "google/gemini-2.0-flash-001")
-            
-        bot.edit_message_text(response.choices[0].message.content.strip(), message.chat.id, processing_msg.message_id)
-        
-    except Exception as e:
-        bot.edit_message_text(f"❌ System Error: {str(e)}", message.chat.id, processing_msg.message_id)
+            response = client.chat.completions.create(
+                model=model,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Analyze this screenshot."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            )
+            return response.choices[0].message.content
+        except Exception:
+            continue
+    return "❌ NO BET"
+
+
+def validate_market(text):
+    if "OVER 7.5" in text or "OVER 6.5" in text or "OVER 5.5" in text or "NO BET" in text:
+        return text
+    return "❌ NO BET"
+
+
+def format_result(raw_text):
+    try:
+        lines = raw_text.split("\n")
+        data = {}
+        for line in lines:
+            if ":" in line:
+                key, value = line.split(":", 1)
+                data[key.strip()] = value.strip()
+
+        return f"""
+╔══════════════════╗
+   ⚽ ULTRA ANALYSIS
+╚══════════════════╝
+
+🏟 Match:
+{data.get("Match", "-")}
+
+📊 Avg Goals:
+➤ Total: {data.get("Avg Total Goals", "-")}
+➤ HT: {data.get("Avg HT Goals", "-")}
+
+🎯 Market:
+{data.get("Best Market", "-")}
+
+📈 Confidence:
+{data.get("Confidence", "-")}
+
+🏆 Verdict:
+{data.get("Verdict", "-")}
+"""
+    except:
+        return raw_text
+
 
 @bot.message_handler(commands=['start'])
-def start_command(message):
-    bot.reply_to(message, "⚽ **ULTRA PRO MAX LEGEND ANALYST**\n\nSystem: ACTIVE\nStatus: Awaiting Screenshot.")
+def start(message):
+    bot.reply_to(message, "Send screenshot.")
 
-# --- KEEP ALIVE ---
+
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    bot.reply_to(message, "Processing...")
+
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        image = Image.open(BytesIO(downloaded_file))
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG")
+
+        image_base64 = base64.b64encode(buffer.getvalue()).decode()
+
+        result = send_to_ai(image_base64)
+        validated = validate_market(result)
+        formatted = format_result(validated)
+
+        bot.reply_to(message, formatted)
+
+    except Exception as e:
+        logging.error(e)
+        bot.reply_to(message, "❌ Error processing image")
+
+
 if __name__ == "__main__":
-    t = Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=False))
-    t.daemon = True
-    t.start()
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
+    print("Bot running (polling mode)...")
+    bot.infinity_polling()
