@@ -18,46 +18,39 @@ client = OpenAI(
 app = Flask('')
 
 # --- GOD MODE SCORING ENGINE PROMPT ---
+# Strictly configured for highest dominance analysis only.
 ULTRA_PRO_PROMPT = """
 ROLE: Elite God Mode Football Scoring Engine.
-TASK: Analyze the provided fixture image and apply the scoring engine logic to identify the best betting market.
+TASK: Analyze the provided fixture image using the God Mode scoring engine. 
 
-SCORING ENGINE RULES:
-1. DATA EXTRACTION: Identify Teams, Avg Goals For/Against, and HT Pace from the image.
-2. MARKET EVALUATION (Evaluate Over 7.5, 6.5, 5.5):
-   - Dim 1 (Total Goals vs Threshold): Gap >= 2.0 (+3), >= 1.2 (+2), >= 0.5 (+1)
-   - Dim 2 (HT Pace): If HT >= Threshold + 0.6 (+2), If HT >= Threshold (+1)
-   - Dim 3 (Defensive Vulnerability): Both >= 3.0 (+2), Both >= 2.5 (+1)
-   - Dim 4 (Consistency): Avg >= 0.75 (+2), >= 0.55 (+1)
-3. CONFIDENCE MAP:
-   - Score 1: 52% | 2: 57% | 3: 62% | 4: 67% | 5: 72% | 6: 77% | 7: 82% | 8: 87% | 9: 91%
-4. VERDICT LOGIC:
-   - Score >= 8: 🔥 GOD MODE
-   - Score >= 6: ⚡ VERY STRONG
-   - Score >= 4: ✅ STRONG
-   - Score < 4: ❌ NO BET
+INSTRUCTIONS:
+1. Identify all matches in the image.
+2. Evaluate each match against the God Mode criteria (Total Avg, HT Pace, Defensive Vulnerability, Consistency).
+3. Select the SINGLE match with the highest confidence score.
+4. Output ONLY the data for that top-tier match.
 
-OUTPUT FORMAT (STRICT):
+STRICT OUTPUT FORMAT:
 MATCH: [Team A vs Team B]
-AVG TOTAL: [Value]
-AVG HT: [Value]
 MARKET: [Market Label]
 CONFIDENCE: [X]%
 VERDICT: [Verdict Label]
-REASONING:
-• [Reason 1]
-• [Reason 2]
-(If No Bet: output ❌ NO BET and why.)
+
+- NO reasoning.
+- NO statistical breakdown.
+- If no match reaches the minimum confidence threshold, output ONLY: ❌ NO QUALIFYING MATCHES.
 """
 
 @bot.message_handler(content_types=['photo'])
 def handle_vision_analysis(message):
     try:
         bot.reply_to(message, "⚡ Calculating God Mode Analysis...")
+        
+        # Get the photo
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
         
+        # Process with God Mode Prompt
         response = client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "https://render.com",
@@ -77,14 +70,16 @@ def handle_vision_analysis(message):
                 }
             ]
         )
+        
         analysis_result = response.choices[0].message.content
         bot.reply_to(message, analysis_result.strip())
+        
     except Exception as e:
         bot.reply_to(message, f"❌ System Error: {str(e)}")
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    bot.reply_to(message, "⚽ **GOD MODE LEGEND ANALYST**\nSystem Status: ⚡ ONLINE\nSend your fixture screenshot.")
+    bot.reply_to(message, "⚽ **GOD MODE LEGEND ANALYST**\nSystem Status: ⚡ ONLINE\nSend your fixture screenshot for the highest probability pick.")
 
 # --- MINIMAL FLASK FOR CRON-JOB.ORG ---
 @app.route('/')
@@ -96,8 +91,10 @@ def run_flask_server():
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
+    # Start web server for uptime
     t = Thread(target=run_flask_server)
     t.daemon = True
     t.start()
+    
     print("Bot starting...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
