@@ -1,5 +1,4 @@
-
 pyTelegramBotApi
-flask
 openai
 Pillow
+requests
