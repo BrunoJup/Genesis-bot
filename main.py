@@ -7,95 +7,32 @@ import telebot
 from PIL import Image
 from openai import OpenAI
 
-# ENV VARIABLES
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+# LOAD ENV VARIABLES
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+
+# SAFETY CHECK
+if not TELEGRAM_TOKEN:
+    raise ValueError("❌ TELEGRAM_TOKEN is missing in environment variables")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("❌ OPENROUTER_API_KEY is missing in environment variables")
 
 # INIT BOT
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 logging.basicConfig(level=logging.INFO)
 
-# AI CLIENT (OpenRouter)
+# AI CLIENT
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY
 )
 
-# ULTRA PROMPT
+# PROMPT
 SYSTEM_PROMPT = """
-You are an elite, expert-level high-precision football goals analysis engine.
-
-STRICT RULES:
-Work silently.
-No explanations.
-No commentary.
-Only output final structured result.
-
-STEP 1 — Extract:
-a_for, a_against, b_for, b_against (arrays)
-
-STEP 2 — Compute:
-a_for_avg
-a_against_avg
-b_for_avg
-b_against_avg
-total_avg = sum of all
-ht_avg = (a_for_avg + b_for_avg) / 2
-
-STEP 3 — Score:
-TOTAL:
-≥9 → +4
-≥8 → +3
-≥7 → +2
-≥6 → +1
-
-HT:
-≥4 → +3
-≥3 → +2
-≥2.5 → +1
-
-DEFENSE:
-both ≥3 → +2
-both ≥2 → +1
-
-STEP 4 — MARKET DECISION:
-
-If total_avg ≥ 8.5 AND score ≥ 8:
-→ OVER 7.5
-
-If 7.2 ≤ total_avg < 8.5 AND score ≥ 6:
-→ OVER 6.5
-
-If 6.0 ≤ total_avg < 7.2 AND score ≥ 5:
-→ OVER 5.5
-
-Else:
-→ NO BET
-
-STEP 5 — CONFIDENCE:
-9+ → 99%
-8 → 94%
-7 → 88%
-6 → 82%
-5 → 76%
-4 → 68%
-<4 → 45%
-
-STEP 6 — VERDICT:
-≥8 → 👑 ULTRA PRO MAX LEGEND PICK
-≥6 → 🔥 VERY STRONG
-≥4 → ✅ STRONG
-<4 → ❌ NO BET
-
-FINAL OUTPUT ONLY:
-
-Match: TEAM A vs TEAM B
-Avg Total Goals: X.XX
-Avg HT Goals: X.XX
-Best Market: OVER X.5 / NO BET
-Confidence: XX%
-Verdict: [Emoji] [Text]
+You are an elite football goals analysis engine.
+Return ONLY final structured result.
 """
 
 MODELS = [
@@ -115,7 +52,7 @@ def send_to_ai(image_base64):
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Analyze this screenshot."},
+                            {"type": "text", "text": "Analyze screenshot"},
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -127,49 +64,10 @@ def send_to_ai(image_base64):
                 ]
             )
             return response.choices[0].message.content
-        except Exception:
+        except Exception as e:
+            logging.error(f"Model {model} failed: {e}")
             continue
     return "❌ NO BET"
-
-
-def validate_market(text):
-    if "OVER 7.5" in text or "OVER 6.5" in text or "OVER 5.5" in text or "NO BET" in text:
-        return text
-    return "❌ NO BET"
-
-
-def format_result(raw_text):
-    try:
-        lines = raw_text.split("\n")
-        data = {}
-        for line in lines:
-            if ":" in line:
-                key, value = line.split(":", 1)
-                data[key.strip()] = value.strip()
-
-        return f"""
-╔══════════════════╗
-   ⚽ ULTRA ANALYSIS
-╚══════════════════╝
-
-🏟 Match:
-{data.get("Match", "-")}
-
-📊 Avg Goals:
-➤ Total: {data.get("Avg Total Goals", "-")}
-➤ HT: {data.get("Avg HT Goals", "-")}
-
-🎯 Market:
-{data.get("Best Market", "-")}
-
-📈 Confidence:
-{data.get("Confidence", "-")}
-
-🏆 Verdict:
-{data.get("Verdict", "-")}
-"""
-    except:
-        return raw_text
 
 
 @bot.message_handler(commands=['start'])
@@ -192,10 +90,8 @@ def handle_photo(message):
         image_base64 = base64.b64encode(buffer.getvalue()).decode()
 
         result = send_to_ai(image_base64)
-        validated = validate_market(result)
-        formatted = format_result(validated)
 
-        bot.reply_to(message, formatted)
+        bot.reply_to(message, result)
 
     except Exception as e:
         logging.error(e)
@@ -203,5 +99,5 @@ def handle_photo(message):
 
 
 if __name__ == "__main__":
-    print("Bot running (polling mode)...")
+    print("Bot running (polling)...")
     bot.infinity_polling()
