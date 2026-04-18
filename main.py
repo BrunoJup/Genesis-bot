@@ -17,15 +17,11 @@ client = OpenAI(
 
 app = Flask('')
 
-# --- ULTRA PRO MAX LEGEND PICK PROMPT ---
+# --- THE HARDENED SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are an elite, expert-level high-precision football goals analysis engine.
 The user will upload a screenshot containing match statistics.
 Your job is to read the screenshot, extract numerical goal data, evaluate the highest-value over markets (Over 5.5, Over 6.5, Over 7.5), and apply an advanced scoring model to output an "Ultra Pro Max Legend Pick".
-Do not explain anything.
-Do not describe the screenshot.
-Do not provide commentary.
-Only extract numbers, calculate, and output the final structured result.
 
 STRICT RULES
 Work silently.
@@ -99,63 +95,51 @@ Confidence: XX%
 Verdict: [Emoji] [Verdict Text]
 """
 
+# --- ANALYSIS ENGINE ---
+def run_ai_analysis(base64_image, model_name):
+    """Executes AI logic with specific model and error handling."""
+    return client.chat.completions.create(
+        extra_headers={"HTTP-Referer": "https://render.com", "X-Title": "Football Analyst Bot"},
+        model=model_name,
+        max_tokens=800,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Analyze this screenshot:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]}
+        ]
+    )
+
 @bot.message_handler(content_types=['photo'])
 def handle_vision_analysis(message):
+    processing_msg = bot.reply_to(message, "⚡ Initializing Analysis (High Precision Mode)...")
     try:
-        bot.reply_to(message, "⚡ Calculating Ultra Pro Max Legend Pick...")
-        
-        # Get the photo
+        # Prepare Image
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
         
-        # Process with Expert System Prompt and FIXED max_tokens
-        response = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "https://render.com",
-                "X-Title": "Football Analyst Bot",
-            },
-            model="openai/gpt-4o",
-            max_tokens=800,  # FIX: Limits response tokens to fit within your credit limit
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "Analyze this screenshot:"},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                        }
-                    ]
-                }
-            ]
-        )
-        
-        analysis_result = response.choices[0].message.content
-        bot.reply_to(message, analysis_result.strip())
+        # Priority: GPT-4o
+        try:
+            response = run_ai_analysis(base64_image, "openai/gpt-4o")
+        except Exception as e:
+            # Fallback: Gemini 2.0
+            bot.edit_message_text("⚠️ Precision Model busy/limited. Switching to Secondary Engine...", message.chat.id, processing_msg.message_id)
+            response = run_ai_analysis(base64_image, "google/gemini-2.0-flash-001")
+            
+        bot.edit_message_text(response.choices[0].message.content.strip(), message.chat.id, processing_msg.message_id)
         
     except Exception as e:
-        bot.reply_to(message, f"❌ System Error: {str(e)}")
+        bot.edit_message_text(f"❌ System Error: {str(e)}", message.chat.id, processing_msg.message_id)
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    bot.reply_to(message, "⚽ **ULTRA PRO MAX LEGEND ANALYST**\nSystem Status: ⚡ ONLINE\nUpload fixture screenshot for the Expert Pick.")
+    bot.reply_to(message, "⚽ **ULTRA PRO MAX LEGEND ANALYST**\n\nSystem: ACTIVE\nStatus: Awaiting Screenshot.")
 
-# --- MINIMAL FLASK FOR CRON-JOB.ORG ---
-@app.route('/')
-def health_check():
-    return "OK", 200
-
-def run_flask_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
+# --- KEEP ALIVE ---
 if __name__ == "__main__":
-    # Start web server for uptime
-    t = Thread(target=run_flask_server)
+    t = Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=False))
     t.daemon = True
     t.start()
-    
-    print("Bot starting...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
