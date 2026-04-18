@@ -109,13 +109,14 @@ def handle_vision_analysis(message):
         downloaded_file = bot.download_file(file_info.file_path)
         base64_image = base64.b64encode(downloaded_file).decode('utf-8')
         
-        # Process with Expert System Prompt
+        # Process with Expert System Prompt and FIXED max_tokens
         response = client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "https://render.com",
                 "X-Title": "Football Analyst Bot",
             },
             model="openai/gpt-4o",
+            max_tokens=800,  # FIX: Limits response tokens to fit within your credit limit
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
