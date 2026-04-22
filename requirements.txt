@@ -1,4 +1,6 @@
 pyTelegramBotAPI
 openai
-Pillow
 requests
+Pillow
+flask
+gunicorn
