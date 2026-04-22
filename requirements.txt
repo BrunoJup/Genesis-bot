@@ -1,4 +1,4 @@
-pyTelegramBotApi
+pyTelegramBotAPI
 openai
 Pillow
 requests
