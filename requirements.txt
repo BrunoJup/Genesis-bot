@@ -1,5 +1,2 @@
-fastapi
-uvicorn
-requests
-python-multipart
-python-telegram-bot==20.7
+pyTelegramBotAPI==4.20.0
+requests==2.31.0
