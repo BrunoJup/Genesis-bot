@@ -2,6 +2,7 @@ import os
 import base64
 import json
 import requests
+import asyncio
 from dataclasses import dataclass
 from typing import List, Dict
 from statistics import mean
@@ -9,7 +10,6 @@ from statistics import mean
 from fastapi import FastAPI, UploadFile, File
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
-import asyncio
 
 # =========================
 # CONFIG
@@ -65,10 +65,9 @@ class Engine:
 
         confidence = min(95, 50 + score * 10)
 
-        # SAFE "AUTO BET" LOGIC (signal only)
         stake = 0
         if market != "NO BET":
-            stake = round(confidence / 100 * 5, 2)  # % bankroll idea
+            stake = round(confidence / 100 * 5, 2)
 
         return {
             "match": f.match,
@@ -90,13 +89,13 @@ def extract_fixture(image_bytes: bytes) -> Fixture:
     prompt = """
 Extract football stats from image.
 
-Return JSON:
+Return STRICT JSON:
 {
  "match": "...",
- "a_for": [5 nums],
- "a_against": [5 nums],
- "b_for": [5 nums],
- "b_against": [5 nums]
+ "a_for": [x,x,x,x,x],
+ "a_against": [x,x,x,x,x],
+ "b_for": [x,x,x,x,x],
+ "b_against": [x,x,x,x,x]
 }
 """
 
@@ -126,10 +125,14 @@ Return JSON:
 
     data = res.json()
 
-    content = data["choices"][0]["message"]["content"]
-    parsed = json.loads(content)
+    try:
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
 
-    return Fixture(**parsed)
+        return Fixture(**parsed)
+
+    except Exception as e:
+        raise ValueError(f"Parsing failed: {e} | Raw: {data}")
 
 # =========================
 # FASTAPI
@@ -168,7 +171,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fixture = extract_fixture(img)
         result = engine.analyze(fixture)
 
-        # AUTO BET SIGNAL OUTPUT
         if result["market"] == "NO BET":
             msg = f"""
 ❌ NO BET
@@ -193,30 +195,35 @@ HT: {result['ht_projection']}
         await update.message.reply_text(msg)
 
     except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}")
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send screenshot 📸")
 
-# =========================
-# RUN BOTH API + BOT
-# =========================
+
 async def run_bot():
     app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app_bot.add_handler(MessageHandler(filters.COMMAND, start))
 
-    print("BOT RUNNING...")
-    await app_bot.run_polling()
+    print("🤖 BOT STARTED")
+
+    await app_bot.initialize()
+    await app_bot.start()
+    await app_bot.updater.start_polling()
 
 # =========================
-# ENTRYPOINT
+# STARTUP EVENT (FIX)
+# =========================
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(run_bot())
+
+# =========================
+# ENTRYPOINT (FIX)
 # =========================
 if __name__ == "__main__":
     import uvicorn
-    loop = asyncio.get_event_loop()
-
-    loop.create_task(run_bot())
-
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)
