@@ -2,13 +2,12 @@ import os
 import base64
 import json
 import requests
-import asyncio
 from dataclasses import dataclass
 from typing import List, Dict
 from statistics import mean
 
-from fastapi import FastAPI, UploadFile, File
-from telegram import Update
+from fastapi import FastAPI, UploadFile, File, Request
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
 # =========================
@@ -16,6 +15,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 # =========================
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://your-app.onrender.com/webhook
 
 MODEL = "openai/gpt-4o-mini"
 
@@ -65,15 +65,10 @@ class Engine:
 
         confidence = min(95, 50 + score * 10)
 
-        stake = 0
-        if market != "NO BET":
-            stake = round(confidence / 100 * 5, 2)
-
         return {
             "match": f.match,
             "market": market,
             "confidence": confidence,
-            "stake_units": stake,
             "goal_projection": total,
             "ht_projection": ht
         }
@@ -124,69 +119,40 @@ Return STRICT JSON:
     )
 
     data = res.json()
+    content = data["choices"][0]["message"]["content"]
 
-    try:
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+    # clean markdown if exists
+    content = content.replace("```json", "").replace("```", "").strip()
 
-        return Fixture(**parsed)
-
-    except Exception as e:
-        raise ValueError(f"Parsing failed: {e} | Raw: {data}")
+    parsed = json.loads(content)
+    return Fixture(**parsed)
 
 # =========================
-# FASTAPI
+# TELEGRAM SETUP
 # =========================
 app = FastAPI()
+bot = Bot(token=TELEGRAM_TOKEN)
 
-@app.get("/")
-def home():
-    return {"status": "RUNNING"}
+telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    img = await file.read()
-    fixture = extract_fixture(img)
-    result = engine.analyze(fixture)
-
-    return {
-        "fixture": fixture.__dict__,
-        "analysis": result
-    }
-
-# =========================
-# TELEGRAM BOT
-# =========================
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photo = update.message.photo[-1]
         file = await photo.get_file()
 
-        path = "tmp.jpg"
-        await file.download_to_drive(path)
+        img_bytes = await file.download_as_bytearray()
 
-        with open(path, "rb") as f:
-            img = f.read()
-
-        fixture = extract_fixture(img)
+        fixture = extract_fixture(img_bytes)
         result = engine.analyze(fixture)
 
         if result["market"] == "NO BET":
-            msg = f"""
-❌ NO BET
-
-Match: {result['match']}
-Projection: {result['goal_projection']}
-"""
+            msg = f"❌ NO BET\n\nMatch: {result['match']}"
         else:
-            msg = f"""
-🔥 BET SIGNAL
+            msg = f"""🔥 BET SIGNAL
 
 Match: {result['match']}
 Market: {result['market']}
-
 Confidence: {result['confidence']}%
-Stake: {result['stake_units']} units
 
 Goals: {result['goal_projection']}
 HT: {result['ht_projection']}
@@ -197,33 +163,32 @@ HT: {result['ht_projection']}
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send screenshot 📸")
-
-
-async def run_bot():
-    app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-    app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app_bot.add_handler(MessageHandler(filters.COMMAND, start))
-
-    print("🤖 BOT STARTED")
-
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling()
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
 # =========================
-# STARTUP EVENT (FIX)
+# WEBHOOK ENDPOINT
+# =========================
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, bot)
+
+    await telegram_app.initialize()
+    await telegram_app.process_update(update)
+
+    return {"ok": True}
+
+# =========================
+# HEALTH CHECK
+# =========================
+@app.get("/")
+def home():
+    return {"status": "Webhook bot running"}
+
+# =========================
+# STARTUP: SET WEBHOOK
 # =========================
 @app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(run_bot())
-
-# =========================
-# ENTRYPOINT (FIX)
-# =========================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=10000)
+async def startup():
+    await bot.set_webhook(WEBHOOK_URL)
+    print("✅ Webhook set")
