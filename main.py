@@ -1,127 +1,222 @@
 import os
 import base64
-import re
+import json
 import requests
-import time
-from io import BytesIO
-from PIL import Image
-import telebot
-from openai import OpenAI
-from flask import Flask, request
+from dataclasses import dataclass
+from typing import List, Dict
+from statistics import mean
+
+from fastapi import FastAPI, UploadFile, File
+from telegram import Update
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+import asyncio
 
 # =========================
 # CONFIG
 # =========================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-RENDER_URL = os.getenv("RENDER_URL") # Example: https://your-app-name.onrender.com
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-app = Flask(__name__)
+MODEL = "openai/gpt-4o-mini"
 
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
+# =========================
+# DATA STRUCTURE
+# =========================
+@dataclass
+class Fixture:
+    match: str
+    a_for: List[float]
+    a_against: List[float]
+    b_for: List[float]
+    b_against: List[float]
 
-SYSTEM_PROMPT = """
-🔒 SYSTEM MODE: V7.1 — BETPAWA VIRTUAL 1H TOP SCORER DETECTOR
-📊 INPUT TYPE: SCREENSHOT (PAST RESULTS + CURRENT FIXTURES)
-🎯 OUTPUT MODE: SINGLE MATCH ONLY
+# =========================
+# ENGINE
+# =========================
+class Engine:
+    def avg(self, v): return round(mean(v), 2)
 
-🧠 CORE OBJECTIVE:
-Identify the ONE team with the HIGHEST TOTAL FIRST HALF (1H) GOALS SCORED across the LAST 3 MATCHDAYS, then locate its current fixture.
+    def analyze(self, f: Fixture) -> Dict:
+        a_att = self.avg(f.a_for)
+        b_att = self.avg(f.b_for)
+        a_def = self.avg(f.a_against)
+        b_def = self.avg(f.b_against)
 
-⚙️ EXECUTION ENGINE:
-1️⃣ Extract ONLY first-half scores from LAST 3 matches
-2️⃣ Sum ONLY goals scored (not conceded)
-3️⃣ Pick team with highest total (consistency priority)
-4️⃣ Match with current fixtures
-5️⃣ Resolve ties via consistency → fixture order
+        total = round(a_att + b_att + a_def + b_def, 2)
+        ht = round((a_att + b_att) / 2, 2)
 
-🚫 RULES:
-- NO explanations
-- NO multiple picks
-- NO full-time data
+        score = 0
+        if total >= 7: score += 3
+        elif total >= 5: score += 2
+        elif total >= 4: score += 1
 
-📢 OUTPUT:
-🔥 [HOME TEAM] vs [AWAY TEAM]
-⚡ TEAM: [TEAM NAME]
-📊 CONFIDENCE: [HIGH/MEDIUM/LOW]
-🎯 ACCURACY: [X/10]
+        if ht >= 2.5: score += 2
+        elif ht >= 2.0: score += 1
+
+        if a_def >= 2.5 and b_def >= 2.5:
+            score += 1
+
+        if score >= 5:
+            market = "Over 2.5"
+        elif score >= 3:
+            market = "Over 1.5"
+        else:
+            market = "NO BET"
+
+        confidence = min(95, 50 + score * 10)
+
+        # SAFE "AUTO BET" LOGIC (signal only)
+        stake = 0
+        if market != "NO BET":
+            stake = round(confidence / 100 * 5, 2)  # % bankroll idea
+
+        return {
+            "match": f.match,
+            "market": market,
+            "confidence": confidence,
+            "stake_units": stake,
+            "goal_projection": total,
+            "ht_projection": ht
+        }
+
+engine = Engine()
+
+# =========================
+# OPENROUTER VISION
+# =========================
+def extract_fixture(image_bytes: bytes) -> Fixture:
+    img_b64 = base64.b64encode(image_bytes).decode()
+
+    prompt = """
+Extract football stats from image.
+
+Return JSON:
+{
+ "match": "...",
+ "a_for": [5 nums],
+ "a_against": [5 nums],
+ "b_for": [5 nums],
+ "b_against": [5 nums]
+}
 """
 
+    res = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": MODEL,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_b64}"
+                        }
+                    }
+                ]
+            }]
+        },
+        timeout=60
+    )
+
+    data = res.json()
+
+    content = data["choices"][0]["message"]["content"]
+    parsed = json.loads(content)
+
+    return Fixture(**parsed)
+
 # =========================
-# HELPER FUNCTIONS
+# FASTAPI
 # =========================
-def download_and_compress(file_id):
-    file_info = bot.get_file(file_id)
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
-    img_bytes = requests.get(file_url).content
-    img = Image.open(BytesIO(img_bytes))
-    img = img.convert("RGB")
-    buffer = BytesIO()
-    img.save(buffer, format="JPEG", quality=60)
-    return buffer.getvalue()
+app = FastAPI()
 
-def validate_output(text):
-    pattern = r"🔥 .+ vs .+\n⚡ TEAM: .+\n📊 CONFIDENCE: (HIGH|MEDIUM|LOW)\n🎯 ACCURACY: \d+/10"
-    return re.search(pattern, text.strip())
+@app.get("/")
+def home():
+    return {"status": "RUNNING"}
 
-def fix_output(text):
-    lines = text.strip().split("\n")
-    match_line = next((l for l in lines if "vs" in l), "🔥 UNKNOWN vs UNKNOWN")
-    team_line = next((l for l in lines if "TEAM" in l), "⚡ TEAM: UNKNOWN")
-    conf_line = next((l for l in lines if "CONFIDENCE" in l), "📊 CONFIDENCE: MEDIUM")
-    acc_line = next((l for l in lines if "ACCURACY" in l), "🎯 ACCURACY: 5/10")
-    return f"{match_line}\n{team_line}\n{conf_line}\n{acc_line}"
+@app.post("/analyze")
+async def analyze(file: UploadFile = File(...)):
+    img = await file.read()
+    fixture = extract_fixture(img)
+    result = engine.analyze(fixture)
 
-def analyze_image(image_bytes):
-    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+    return {
+        "fixture": fixture.__dict__,
+        "analysis": result
+    }
+
+# =========================
+# TELEGRAM BOT
+# =========================
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        response = client.chat.completions.create(
-            model="openai/gpt-4o",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [{"type": "text", "text": "Analyze this screenshot."}, 
-                                           {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]},
-            ],
-        )
-        result = response.choices[0].message.content.strip()
-        return result if validate_output(result) else fix_output(result)
-    except Exception:
-        return "❌ Failed to analyze image. Try again."
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+
+        path = "tmp.jpg"
+        await file.download_to_drive(path)
+
+        with open(path, "rb") as f:
+            img = f.read()
+
+        fixture = extract_fixture(img)
+        result = engine.analyze(fixture)
+
+        # AUTO BET SIGNAL OUTPUT
+        if result["market"] == "NO BET":
+            msg = f"""
+❌ NO BET
+
+Match: {result['match']}
+Projection: {result['goal_projection']}
+"""
+        else:
+            msg = f"""
+🔥 BET SIGNAL
+
+Match: {result['match']}
+Market: {result['market']}
+
+Confidence: {result['confidence']}%
+Stake: {result['stake_units']} units
+
+Goals: {result['goal_projection']}
+HT: {result['ht_projection']}
+"""
+
+        await update.message.reply_text(msg)
+
+    except Exception as e:
+        await update.message.reply_text(f"Error: {str(e)}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send screenshot 📸")
 
 # =========================
-# BOT HANDLERS
+# RUN BOTH API + BOT
 # =========================
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    bot.reply_to(message, "⏳ Processing...")
-    file_id = message.photo[-1].file_id
-    image_bytes = download_and_compress(file_id)
-    bot.reply_to(message, analyze_image(image_bytes))
+async def run_bot():
+    app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    bot.reply_to(message, "📸 Send a screenshot.")
+    app_bot.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app_bot.add_handler(MessageHandler(filters.COMMAND, start))
+
+    print("BOT RUNNING...")
+    await app_bot.run_polling()
 
 # =========================
-# WEBHOOK ROUTE
+# ENTRYPOINT
 # =========================
-@app.route('/' + TELEGRAM_TOKEN, methods=['POST'])
-def get_message():
-    json_str = request.get_data().decode('UTF-8')
-    update = telebot.types.Update.de_json(json_str)
-    bot.process_new_updates([update])
-    return "!", 200
-
-# =========================
-# STARTUP
-# =========================
-# Register the webhook
-bot.remove_webhook()
-bot.set_webhook(url=f"{RENDER_URL}/{TELEGRAM_TOKEN}")
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    import uvicorn
+    loop = asyncio.get_event_loop()
+
+    loop.create_task(run_bot())
+
+    uvicorn.run(app, host="0.0.0.0", port=10000)
