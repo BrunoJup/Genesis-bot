@@ -1,6 +1,5 @@
-pyTelegramBotAPI
-openai
+fastapi
+uvicorn
 requests
-Pillow
-flask
-gunicorn
+python-multipart
+python-telegram-bot==20.7
