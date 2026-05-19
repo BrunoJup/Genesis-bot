@@ -1,6 +1,8 @@
 import os
 import logging
 import requests
+import sqlite3
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 
@@ -9,14 +11,33 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 # ─────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-VISION_MODEL = "openai/gpt-4o-mini"  # vision-capable via OpenRouter
+VISION_MODEL = "openai/gpt-4o-mini"
 
 logging.basicConfig(level=logging.INFO)
 
 # ─────────────────────────────────────────────
-# AGENT CHLOE CORE STRATEGY (HIDDEN LOGIC)
+# DATABASE SETUP
+# ─────────────────────────────────────────────
+conn = sqlite3.connect("predictions.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_name TEXT,
+    market TEXT,
+    odd REAL,
+    result TEXT,
+    created_at TEXT
+)
+""")
+conn.commit()
+
+# ─────────────────────────────────────────────
+# STRATEGY ENGINE
 # ─────────────────────────────────────────────
 def agent_chloe_analysis(data):
     try:
@@ -33,7 +54,7 @@ def agent_chloe_analysis(data):
         in_3_range = {k: v for k, v in combos.items() if 3.0 <= v < 4.0}
 
         if len(in_3_range) != 3:
-            return '❌ "Strategy conditions not met"'
+            return None
 
         sorted_vals = sorted(in_3_range.items(), key=lambda x: x[1])
         median_combo, _ = sorted_vals[1]
@@ -54,104 +75,135 @@ def agent_chloe_analysis(data):
 
         match_name, market, odd = best_pick
 
-        return f"""🔥 **FINAL VERDICT:**
-
-**{match_name} — {market} Goals @ {odd}**
-
-📌 *Reason:* Based on stable median clustering and filtered odds structure. The {median_combo} combination yielded the perfect median marker, and extracting the smallest individual risk component points directly to the {match_name.split()[0]} market."""
-    
-    except:
-        return "❌ Error processing data."
-
-
-# ─────────────────────────────────────────────
-# VISION: EXTRACT DATA FROM IMAGE USING OPENROUTER
-# ─────────────────────────────────────────────
-def extract_data_from_image(image_url):
-    prompt = """
-You are an AI that extracts structured betting data.
-
-From this image, extract:
-- Two match names
-- Over odds
-- Under odds
-
-Return ONLY valid JSON in this format:
-{
-  "match1": {"name": "...", "over": 1.85, "under": 1.95},
-  "match2": {"name": "...", "over": 1.90, "under": 1.88}
-}
-
-NO explanation. ONLY JSON.
-"""
-
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://your-app.onrender.com",
-        "X-Title": "Agent Chloe"
-    }
-
-    payload = {
-        "model": VISION_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-            }
-        ]
-    }
-
-    response = requests.post(OPENROUTER_URL, headers=headers, json=payload)
-
-    result = response.json()
-
-    try:
-        content = result["choices"][0]["message"]["content"]
-
-        import json
-        return json.loads(content)
+        return {
+            "match_name": match_name,
+            "market": f"{market} Goals",
+            "odd": odd,
+            "combo": median_combo
+        }
 
     except:
         return None
 
 
 # ─────────────────────────────────────────────
-# TELEGRAM HANDLER (IMAGE)
+# SAVE PREDICTION
+# ─────────────────────────────────────────────
+def save_prediction(pred):
+    cursor.execute("""
+    INSERT INTO predictions (match_name, market, odd, result, created_at)
+    VALUES (?, ?, ?, ?, ?)
+    """, (
+        pred["match_name"],
+        pred["market"],
+        pred["odd"],
+        "PENDING",
+        datetime.utcnow().isoformat()
+    ))
+    conn.commit()
+
+
+# ─────────────────────────────────────────────
+# VISION EXTRACTION
+# ─────────────────────────────────────────────
+def extract_data_from_image(image_url):
+    prompt = """
+Extract 2 matches with Over/Under odds.
+
+Return ONLY JSON:
+{
+  "match1": {"name": "...", "over": 1.85, "under": 1.95},
+  "match2": {"name": "...", "over": 1.90, "under": 1.88}
+}
+"""
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+        }]
+    }
+
+    r = requests.post(OPENROUTER_URL, headers=headers, json=payload)
+
+    try:
+        import json
+        return json.loads(r.json()["choices"][0]["message"]["content"])
+    except:
+        return None
+
+
+# ─────────────────────────────────────────────
+# TELEGRAM HANDLER
 # ─────────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
-
     image_url = file.file_path
 
-    await update.message.reply_text("🔍 Analyzing screenshot...")
+    await update.message.reply_text("🔍 Processing...")
 
     data = extract_data_from_image(image_url)
 
     if not data:
-        await update.message.reply_text("❌ Failed to read image. Try clearer screenshot.")
+        await update.message.reply_text("❌ Failed to read image.")
         return
 
-    result = agent_chloe_analysis(data)
+    pred = agent_chloe_analysis(data)
 
-    await update.message.reply_text(result, parse_mode="Markdown")
+    if not pred:
+        await update.message.reply_text('❌ "Strategy conditions not met"')
+        return
+
+    save_prediction(pred)
+
+    response = f"""🔥 **FINAL VERDICT:**
+
+**{pred['match_name']} — {pred['market']} @ {pred['odd']}**
+
+📌 *Reason:* Based on stable median clustering and filtered odds structure. The {pred['combo']} combination yielded the perfect median marker, and extracting the smallest individual risk component points directly to the {pred['match_name'].split()[0]} market."""
+
+    await update.message.reply_text(response, parse_mode="Markdown")
 
 
 # ─────────────────────────────────────────────
-# MAIN
+# WEBHOOK SERVER (RENDER READY)
 # ─────────────────────────────────────────────
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+from flask import Flask, request
 
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+app = Flask(__name__)
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    print("🤖 Agent Chloe Vision Bot Running...")
-    app.run_polling()
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
 
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "ok"
+
+
+@app.route("/")
+def home():
+    return "Agent Chloe is live 🤖"
+
+
+# ─────────────────────────────────────────────
+# START
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 10000)),
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}"
+    )
